@@ -10,10 +10,12 @@ from superduperdb.backends.sqlalchemy.metadata import SQLAlchemyMetadata
 from superduperdb.vector_search.atlas import MongoAtlasVectorSearcher
 from superduperdb.vector_search.in_memory import InMemoryVectorSearcher
 from superduperdb.vector_search.lance import LanceVectorSearcher
+from superduperdb.backends.astradb.data_backend import AstraDataBackend
 
 data_backends = {
     'mongodb': MongoDataBackend,
     'ibis': IbisDataBackend,
+    'astradb': AstraDataBackend,
 }
 
 artifact_stores = {
