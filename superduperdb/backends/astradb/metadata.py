@@ -19,17 +19,18 @@ class AstraMetaDataStore(MetaDataStore):
 
     def __init__(
         self,
-        conn: t.Any,
-        name: t.Optional[str] = None,
+        conn: AstraDB, name: str
+        # conn: t.Any,
+        # name: t.Optional[str] = None,
     ) -> None:
         self.name = name
-        self.db = conn[name]
+        self.db = conn
         self.meta_collection = self.db['_meta']
         self.cdc_collection = self.db['_cdc_tables']
         self.component_collection = self.db['_objects']
         self.job_collection = self.db['_jobs']
         self.parent_child_mappings = self.db['_parent_child_mappings']
-        self.conn = conn
+        # self.conn = conn
 
     def url(self):
         """
