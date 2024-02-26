@@ -11,7 +11,7 @@ from superduperdb.misc.colors import Colors
 
 class AstraMetaDataStore(MetaDataStore):
     """
-    Data backend for AstraDB.
+    Metadata store for AstraDB.
 
     :param conn: AstraDB client connection
     :param name: Name of database to host filesystem
