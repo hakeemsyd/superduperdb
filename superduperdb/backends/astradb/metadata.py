@@ -24,6 +24,11 @@ class AstraMetaDataStore(MetaDataStore):
     ) -> None:
         self.name = name
         self.db = conn
+        self.parent_child_mappings = None
+        self.job_collection = None
+        self.component_collection = None
+        self.cdc_collection = None
+        self.meta_collection = None
         self.initialize_collections(conn)
 
     @classmethod
