@@ -1,12 +1,11 @@
 import typing as t
-
 import click
 import tenacity
-
 from superduperdb import logging
 from superduperdb.backends.base.metadata import MetaDataStore
 from superduperdb.components.component import Component
 from superduperdb.misc.colors import Colors
+from astrapy.db import AstraDB, AstraDBCollection
 
 
 class AstraMetaDataStore(MetaDataStore):
@@ -17,20 +16,32 @@ class AstraMetaDataStore(MetaDataStore):
     :param name: Name of database to host filesystem
     """
 
+    table_names=["_meta","_cdc_tables","_objects","_jobs","_parent_child_mappings"]
+
     def __init__(
         self,
         conn: AstraDB, name: str
-        # conn: t.Any,
-        # name: t.Optional[str] = None,
     ) -> None:
         self.name = name
         self.db = conn
-        self.meta_collection = self.db['_meta']
-        self.cdc_collection = self.db['_cdc_tables']
-        self.component_collection = self.db['_objects']
-        self.job_collection = self.db['_jobs']
-        self.parent_child_mappings = self.db['_parent_child_mappings']
-        # self.conn = conn
+        self.initialize_collections(conn)
+
+    @classmethod
+    def get_table_names(cls) -> list:
+        """Get table names."""
+        return ["_meta", "_cdc_tables", "_objects", "_jobs", "_parent_child_mappings"]
+
+    def initialize_collections(self, conn: AstraDB) -> None:
+        """Initialize collections."""
+        table_names = self.get_table_names()
+        for table_name in table_names:
+            self.db.create_collection(collection_name=table_name)
+        self.meta_collection = AstraDBCollection(collection_name=table_names[0], astra_db=conn)
+        self.cdc_collection = AstraDBCollection(collection_name=table_names[1], astra_db=conn)
+        self.component_collection = AstraDBCollection(collection_name=table_names[2], astra_db=conn)
+        self.job_collection = AstraDBCollection(collection_name=table_names[3], astra_db=conn)
+        self.parent_child_mappings = AstraDBCollection(collection_name=table_names[4], astra_db=conn)
+
 
     def url(self):
         """
@@ -68,13 +79,6 @@ class AstraMetaDataStore(MetaDataStore):
     def create_job(self, info: t.Dict):
         return self.job_collection.insert_one(info)
 
-    # def get_parent_child_relations(self):
-    #     c = self.parent_child_mappings.find()
-    #     return [(r['parent'], r['child']) for r in c]
-
-    # def get_component_version_children(self, unique_id: str):
-    #     return self.parent_child_mappings.distinct('child', {'parent': unique_id})
-
     def get_job(self, identifier: str):
         return self.job_collection.find_one(filter={'identifier': identifier})
 
@@ -87,7 +91,6 @@ class AstraMetaDataStore(MetaDataStore):
     def update_metadata(self, key: str, value: str):
         return self.meta_collection.update_one(filter={'key': key}, update={'$set': {'value': value}})
 
-#need to implemented the distinct feature
     def get_latest_version(
         self, type_id: str, identifier: str, allow_hidden: bool = False
     ) -> int:
@@ -129,7 +132,6 @@ class AstraMetaDataStore(MetaDataStore):
             filter={'identifier': identifier},update={'$set': {key: value}}
         )
 
-    #simplemented the distinct feature
     def show_components(self, type_id: str, **kwargs) -> t.List[t.Union[t.Any, str]]:
         # TODO: Should this be sorted?
         result = self.component_collection.find(
@@ -141,9 +143,6 @@ class AstraMetaDataStore(MetaDataStore):
                 distinct_values.append(doc['identifier'])
         return distinct_values
 
-
-
-    #implemented the distinct feature
     # TODO: Why is this is needed to prevent failures in CI?
     @tenacity.retry(stop=tenacity.stop_after_attempt(10))
     def show_component_versions(
@@ -157,13 +156,6 @@ class AstraMetaDataStore(MetaDataStore):
             if doc['version'] not in distinct_values:
                 distinct_values.append(doc['version'])
         return distinct_values
-
-
-    # def list_components_in_scope(self, scope: str):
-    #     out = []
-    #     for r in self.component_collection.find(filter={'parent': scope}):
-    #         out.append((r['type_id'], r['identifier']))
-    #     return out
 
     def show_job(self, job_id: str):
         return self.job_collection.find_one(filter={'identifier': job_id})
@@ -185,10 +177,6 @@ class AstraMetaDataStore(MetaDataStore):
             members = Component.make_unique_id(type_id, identifier, version)
 
         return bool(self.component_collection.count_documents(filter={'members': members}))
-
-    # def component_has_parents(self, type_id: str, identifier: str) -> int:
-    #     doc = {'child': {'$regex': f'^{type_id}/{identifier}/'}}
-    #     return self.parent_child_mappings.count_documents(doc)
 
     def component_version_has_parents(
         self, type_id: str, identifier: str, version: int
