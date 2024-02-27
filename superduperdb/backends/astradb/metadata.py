@@ -29,7 +29,7 @@ class AstraMetaDataStore(MetaDataStore):
         self.component_collection = None
         self.cdc_collection = None
         self.meta_collection = None
-        self.initialize_collections(conn)
+        self.initialize_collections(self.db)
 
     @classmethod
     def get_table_names(cls) -> list:
