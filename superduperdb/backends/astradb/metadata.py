@@ -61,10 +61,10 @@ class AstraMetaDataStore(MetaDataStore):
                     default=False,
             ):
                 logging.warn('Aborting...')
-        self.db.delete_collection(self.meta_collection)
-        self.db.delete_collection(self.component_collection)
-        self.db.delete_collection(self.job_collection)
-        self.db.delete_collection(self.parent_child_mappings)
+        table_names = self.get_table_names()
+        for table_name in table_names:
+            if table_name != "_cdc_tables":
+                self.db.delete_collection(collection_name=table_name)
 
     def create_parent_child(self, parent: str, child: str) -> None:
         self.parent_child_mappings.insert_one(
@@ -142,7 +142,7 @@ class AstraMetaDataStore(MetaDataStore):
         )
         for document in response_generator:
             if document['identifier'] not in distinct_values:
-                distinct_values.append(document['identifier'])
+                distinct_values.append(document)
         return distinct_values
 
     def show_component_versions(
@@ -154,7 +154,7 @@ class AstraMetaDataStore(MetaDataStore):
         distinct_values = []
         for doc in result:
             if doc['version'] not in distinct_values:
-                distinct_values.append(doc['version'])
+                distinct_values.append(doc)
         return distinct_values
 
     def show_job(self, job_id: str):
@@ -293,5 +293,3 @@ class AstraMetaDataStore(MetaDataStore):
         """
         Disconnect the client
         """
-
-        # TODO: implement me
