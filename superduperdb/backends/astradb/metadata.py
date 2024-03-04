@@ -15,8 +15,6 @@ class AstraMetaDataStore(MetaDataStore):
     :param name: Name of database to host filesystem
     """
 
-    table_names = ["_meta", "_cdc_tables", "_objects", "_jobs", "_parent_child_mappings"]
-
     def __init__(
             self,
             conn: AstraDB, name: str
@@ -33,7 +31,7 @@ class AstraMetaDataStore(MetaDataStore):
     @classmethod
     def get_table_names(cls) -> list:
         """Get table names."""
-        return ["_meta", "_cdc_tables", "_objects", "_jobs", "_parent_child_mappings"]
+        return ["meta", "cdc_tables", "objects", "jobs", "parent_child_mappings"]
 
     def initialize_collections(self, conn: AstraDB) -> None:
         """Initialize collections."""
@@ -63,7 +61,7 @@ class AstraMetaDataStore(MetaDataStore):
                 logging.warn('Aborting...')
         table_names = self.get_table_names()
         for table_name in table_names:
-            if table_name != "_cdc_tables":
+            if table_name != "cdc_tables":
                 self.db.delete_collection(collection_name=table_name)
 
     def create_parent_child(self, parent: str, child: str) -> None:

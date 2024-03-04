@@ -1,4 +1,7 @@
 from superduperdb.backends.base.data_backend import BaseDataBackend
+from astrapy.db import AstraDB
+from .metadata import AstraMetaDataStore
+from superduperdb.backends.local.artifacts import FileSystemArtifactStore
 
 
 class AstraDataBackend(BaseDataBackend):
@@ -41,14 +44,13 @@ class AstraDataBackend(BaseDataBackend):
         """
         Build a default metadata store based on current connection.
         """
-        # return AstraMetaDataStore(self.conn, self.name)
-        pass
+        return AstraMetaDataStore(self.conn, self.name)
 
     def build_artifact_store(self):
         """
         Build a default artifact store based on current connection.
         """
-        pass
+        return FileSystemArtifactStore(conn='.superduperdb/artifacts/', name='astra')
 
     def get_table_or_collection(self, identifier):
         return self.db.collection(identifier)
