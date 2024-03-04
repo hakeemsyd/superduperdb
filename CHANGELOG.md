@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Before you create a Pull Request, remember to update the Changelog with your changes.**
 
-
-
 ## Changes Since Last Release
 
 #### Changed defaults / behaviours
@@ -17,9 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### New Features & Functionality
 - CI fails if CHANGELOG.md is not updated on PRs
 - Update Menu structure and renamed use-cases
+- Change and simplify the contract for writing new `_Predictor` descendants (`.predict_one`, `.predict`)
+- Add file datatype type to support saving and reading files/folders in artifact_store
+- Create models directly by importing package from auto and with decorator `@objectmodel`, `@torchmodel`
+- Optimize LLM fine-tuning
 
 #### Bug Fixes
+- Fixed the bug where select in listener is modified in schedule_jobs.
 - LLM CI random errors
+- VectorIndex schedule_jobs missing function.
 
 ## [0.1.1](https://github.com/SuperDuperDB/superduperdb/compare/0.0.20...0.1.0])    (2023-Feb-09)
 
@@ -37,12 +41,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### New Features & Functionality
 
+- Add Llama cpp model in extensions.
+- Basic Ray server support to server models on ray cluster
+- Add Graph mode support to chain models
 - Simplify the testing of SQL databases using containerized databases
 - Integrate Monitoring(cadvisor/Prometheus) and Logging (promtail/Loki) with Grafana, in the `testenv`
 - Add `QueryModel` and `SequentialModel` to make chaining searches and models easier.
 - Add `insert_to=<table-or-collection>` to `.predict` to allow single predictions to be saved.
 - Support vLLM (running locally or remotely on a ray cluster)
 - Support LLM service in OpenAI format
+- Add lazy loading of artifacts by default
 
 #### Bug Fixes
 

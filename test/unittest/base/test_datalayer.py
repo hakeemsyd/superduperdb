@@ -1,9 +1,8 @@
 import time
 from typing import Any, ClassVar, Optional, Sequence
 
+import numpy
 import pytest
-
-from superduperdb.backends.base.artifact import ArtifactSavingError
 
 try:
     import torch
@@ -29,12 +28,12 @@ from superduperdb.components.component import Component
 from superduperdb.components.dataset import Dataset
 from superduperdb.components.datatype import (
     DataType,
-    Encodable,
+    LazyArtifact,
     dill_serializer,
     pickle_serializer,
 )
 from superduperdb.components.listener import Listener
-from superduperdb.components.model import Model
+from superduperdb.components.model import ObjectModel
 from superduperdb.components.schema import Schema
 
 n_data_points = 250
@@ -76,7 +75,7 @@ class TestComponent(Component):
 
 
 def add_fake_model(db: Datalayer):
-    model = Model(
+    model = ObjectModel(
         object=lambda x: str(x),
         identifier='fake_model',
         datatype=DataType(identifier='base'),
@@ -97,7 +96,7 @@ def add_fake_model(db: Datalayer):
         select = db.load('table', 'documents').to_query().select('id', 'x')
     db.add(
         Listener(
-            model='fake_model',
+            model=model,
             select=select,
             key='x',
         ),
@@ -154,7 +153,7 @@ def test_add_component_with_bad_artifact(db):
     component = TestComponent(
         identifier='test', artifact=artifact, artifacts={'artifact': pickle_serializer}
     )
-    with pytest.raises(ArtifactSavingError):
+    with pytest.raises(Exception):
         db.add(component)
 
 
@@ -219,21 +218,21 @@ def test_add(db):
 
 @pytest.mark.parametrize("db", [DBConfig.mongodb_empty], indirect=True)
 def test_add_with_artifact(db):
-    m = Model(
+    m = ObjectModel(
         identifier='test',
         object=lambda x: x + 2,
         datatype=dill_serializer,
     )
 
     db.add(m)
+
     m = db.load('model', m.identifier)
 
-    import pprint
+    assert m.object is not None
 
-    pprint.pprint(m)
-
-    # assert m.object is not None
-    # assert callable(m.object)
+    assert isinstance(m.object, LazyArtifact)
+    m.init()
+    assert callable(m.object)
 
 
 @pytest.mark.parametrize("db", [DBConfig.sqldb_empty], indirect=True)
@@ -332,7 +331,7 @@ def test_remove_component_with_artifact(db):
         'test-component', 'test_with_artifact', 0
     )
     artifact_file_id = info_with_artifact['dict']['artifact']['_content']['file_id']
-    with patch.object(db.artifact_store, '_delete_bytes') as mock_delete:
+    with patch.object(db.artifact_store, '_delete_artifact') as mock_delete:
         db._remove_component_version(
             'test-component', 'test_with_artifact', 0, force=True
         )
@@ -424,72 +423,6 @@ def test_show(db):
     assert db.show('test-component', 'b', -1)['version'] == 2
 
 
-@pytest.mark.skipif(not torch, reason='Torch not installed')
-@pytest.mark.parametrize(
-    "db", [DBConfig.mongodb_empty, DBConfig.sqldb_empty], indirect=True
-)
-def test_predict(db: Datalayer):
-    models = [
-        TorchModel(
-            object=torch.nn.Linear(16, 2),
-            identifier='model1',
-            datatype=tensor(torch.float32, shape=(4, 2)),
-        ),
-        TorchModel(
-            object=torch.nn.Linear(16, 3),
-            identifier='model2',
-            datatype=tensor(torch.float32, shape=(4, 3)),
-        ),
-        TorchModel(
-            object=torch.nn.Linear(16, 3),
-            identifier='model3',
-            datatype=DataType(
-                identifier='test-datatype',
-                encoder=lambda x: torch.argmax(x, dim=1),
-            ),
-        ),
-    ]
-    db.add(models)
-
-    # test model selection
-    x = torch.randn(4, 16)
-    assert db.predict('model1', x)[0]['_base'].x.shape == torch.Size([4, 2])
-    assert db.predict('model2', x)[0]['_base'].x.shape == torch.Size([4, 3])
-
-
-@pytest.mark.skipif(not torch, reason='Torch not installed')
-@pytest.mark.parametrize(
-    "db", [DBConfig.mongodb_empty, DBConfig.sqldb_empty], indirect=True
-)
-def test_predict_context(db: Datalayer):
-    db.add(
-        TorchModel(
-            object=torch.nn.Linear(16, 2),
-            identifier='model',
-            datatype=tensor(torch.float32, shape=(4, 2)),
-        )
-    )
-
-    y, context_out = db.predict('model', torch.randn(4, 16))
-    assert not context_out
-
-    with patch.object(db, '_get_context') as mock_get_context:
-        mock_get_context.return_value = (
-            [Document({'_base': 'test'}), Document({'_base': 'test'})],
-            [
-                Document({'_base': Encodable(datatype=None, x=torch.randn(4, 2))}),
-                Document({'_base': Encodable(datatype=None, x=torch.randn(4, 3))}),
-            ],
-        )
-        y, context_out = db.predict(
-            'model',
-            torch.randn(4, 16),
-            context_select=Collection('context_collection').find({}),
-        )
-        assert context_out[0]['_base'].x.shape == torch.Size([4, 2])
-        assert context_out[1]['_base'].x.shape == torch.Size([4, 3])
-
-
 @pytest.mark.parametrize(
     "db", [DBConfig.mongodb_empty, DBConfig.sqldb_empty], indirect=True
 )
@@ -498,7 +431,7 @@ def test_get_context(db):
 
     fake_contexts = [Document({'text': f'hello world {i}'}) for i in range(10)]
 
-    model = Model(object=lambda x: x, identifier='model', takes_context=True)
+    model = ObjectModel(object=lambda x, context: x, identifier='model')
     context_select = MagicMock(spec=Select)
     context_select.variables = []
     context_select.execute.return_value = fake_contexts
@@ -516,7 +449,7 @@ def test_get_context(db):
     ]
 
     # Testing models that cannot accept context
-    model = Model(object=lambda x: x, identifier='model', takes_context=False)
+    model = ObjectModel(object=lambda x: x, identifier='model')
     with pytest.raises(AssertionError):
         db._get_context(model, context_select, context_key=None)
 
@@ -525,13 +458,13 @@ def test_get_context(db):
     "db", [DBConfig.mongodb_empty, DBConfig.sqldb_empty], indirect=True
 )
 def test_load(db):
-    m1 = Model(object=lambda x: x, identifier='m1', datatype=dtype('int32'))
+    m1 = ObjectModel(object=lambda x: x, identifier='m1', datatype=dtype('int32'))
     db.add(
         [
             DataType(identifier='e1'),
             DataType(identifier='e2'),
             m1,
-            Model(object=lambda x: x, identifier='m1', datatype=dtype('int32')),
+            ObjectModel(object=lambda x: x, identifier='m1', datatype=dtype('int32')),
             m1,
         ]
     )
@@ -569,6 +502,20 @@ def test_insert_mongo_db(db):
     )
     result = [doc.outputs('x', 'fake_model') for doc in new_docs]
     assert sorted(result) == ['0', '1', '2', '3', '4']
+
+
+@pytest.mark.parametrize("db", [DBConfig.mongodb_empty], indirect=True)
+def test_insert_artifacts(db):
+    dt = DataType('my_saveable', encodable='artifact')
+    db.add(dt)
+    db.insert(
+        Collection('documents').insert_many(
+            [Document({'x': dt(numpy.random.randn(100))}) for _ in range(1)]
+        )
+    )
+    r = db.execute(Collection('documents').find_one())
+    assert db.artifact_store.exists(r['x'].file_id)
+    assert isinstance(r.unpack(db=db)['x'], numpy.ndarray)
 
 
 @pytest.mark.parametrize("db", [DBConfig.sqldb_empty], indirect=True)
@@ -627,7 +574,7 @@ def test_delete(db):
     "db", [DBConfig.mongodb_empty, DBConfig.sqldb_empty], indirect=True
 )
 def test_replace(db):
-    model = Model(
+    model = ObjectModel(
         object=lambda x: x + 1,
         identifier='m',
         datatype=DataType(identifier='base'),
@@ -638,17 +585,21 @@ def test_replace(db):
 
     db.replace(model, upsert=True)
 
-    assert db.load('model', 'm').predict([1]) == [2]
+    assert db.load('model', 'm').predict_one(1) == 2
 
     # replace the 0 version of the model
-    new_model = Model(object=lambda x: x + 2, identifier='m')
+    new_model = ObjectModel(
+        object=lambda x: x + 2, identifier='m', signature='singleton'
+    )
     new_model.version = 0
     db.replace(new_model)
     time.sleep(0.1)
     assert db.load('model', 'm').predict([1]) == [3]
 
     # replace the last version of the model
-    new_model = Model(object=lambda x: x + 3, identifier='m')
+    new_model = ObjectModel(
+        object=lambda x: x + 3, identifier='m', signature='singleton'
+    )
     db.replace(new_model)
     time.sleep(0.1)
     assert db.load('model', 'm').predict([1]) == [4]

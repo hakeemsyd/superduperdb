@@ -9,12 +9,17 @@ from superduperdb.base.document import Document
 from superduperdb.components.component import Component
 from superduperdb.components.datatype import DataType
 from superduperdb.components.listener import Listener
+from superduperdb.components.model import Mapping, ModelInputType
 from superduperdb.ext.utils import str_shape
+from superduperdb.jobs.job import FunctionJob
 from superduperdb.misc.annotations import public_api
 from superduperdb.misc.special_dicts import MongoStyleDict
 from superduperdb.vector_search.base import VectorIndexMeasureType
+from superduperdb.vector_search.update_tasks import copy_vectors
 
 KeyType = t.Union[str, t.List, t.Dict]
+if t.TYPE_CHECKING:
+    from superduperdb.jobs.job import Job
 
 
 @public_api(stability='stable')
@@ -33,8 +38,8 @@ class VectorIndex(Component):
 
     type_id: t.ClassVar[str] = 'vector_index'
 
-    indexing_listener: t.Union[Listener, str]
-    compatible_listener: t.Union[None, Listener, str] = None
+    indexing_listener: Listener
+    compatible_listener: t.Optional[Listener] = None
     measure: VectorIndexMeasureType = VectorIndexMeasureType.cosine
     metric_values: t.Optional[t.Dict] = dc.field(default_factory=dict)
 
@@ -93,18 +98,11 @@ class VectorIndex(Component):
                     f'VectorIndex keys: {keys}, with model: {models}'
                 )
 
-        if isinstance(key, str):
-            model_input = document[key]
-        elif isinstance(key, (tuple, list)):
-            model_input = [document[k] for k in list(key)]
-        elif isinstance(key, dict):
-            model_input = [document[k] for k in key.values()]
-        else:
-            model_input = document
-
         model = db.models[model_name]
+        data = Mapping(key, model.signature)(document)
+        args, kwargs = model.handle_input_type(data, model.signature)
         return (
-            model.predict(model_input, one=True),
+            model.predict_one(*args, **kwargs),
             model.identifier,
             key,
         )
@@ -150,7 +148,7 @@ class VectorIndex(Component):
         )
 
     @property
-    def models_keys(self) -> t.Tuple[t.List[str], t.List[KeyType]]:
+    def models_keys(self) -> t.Tuple[t.List[str], t.List[ModelInputType]]:
         """
         Return a list of model and keys for each listener
         """
@@ -162,7 +160,7 @@ class VectorIndex(Component):
         else:
             listeners = [self.indexing_listener]
 
-        models = [w.model.identifier for w in listeners]  # type: ignore[union-attr]
+        models = [w.model.identifier for w in listeners]
         keys = [w.key for w in listeners]
         return models, keys
 
@@ -174,12 +172,38 @@ class VectorIndex(Component):
             return shape[-1]
         raise ValueError('Couldn\'t get shape of model outputs from model encoder')
 
+    @override
+    def schedule_jobs(
+        self,
+        db: Datalayer,
+        dependencies: t.Sequence['Job'] = (),
+    ) -> t.Sequence[t.Any]:
+        """
+        Schedule jobs for the listener
+
+        :param database: The DB instance to process
+        :param dependencies: A list of dependencies
+        :param verbose: Whether to print verbose output
+        """
+
+        job = FunctionJob(
+            callable=copy_vectors,
+            args=[],
+            kwargs={
+                'vector_index': self.identifier,
+                'ids': [],
+                'query': self.indexing_listener.select.dict().encode(),
+            },
+        )
+        job(db, dependencies=dependencies)
+        return [job]
+
 
 class EncodeArray:
     def __init__(self, dtype):
         self.dtype = dtype
 
-    def __call__(self, x):
+    def __call__(self, x, info: t.Optional[t.Dict] = None):
         x = np.asarray(x)
         if x.dtype != self.dtype:
             raise TypeError(f'dtype was {x.dtype}, expected {self.dtype}')
@@ -190,7 +214,7 @@ class DecodeArray:
     def __init__(self, dtype):
         self.dtype = dtype
 
-    def __call__(self, bytes):
+    def __call__(self, bytes, info: t.Optional[t.Dict] = None):
         return np.frombuffer(bytes, dtype=self.dtype).tolist()
 
 
@@ -205,6 +229,7 @@ def vector(shape):
         shape=shape,
         encoder=None,
         decoder=None,
+        encodable='native',
     )
 
 

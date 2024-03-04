@@ -1,6 +1,7 @@
 import os
 import shutil
 import typing as t
+from pathlib import Path
 
 import click
 
@@ -35,12 +36,16 @@ class FileSystemArtifactStore(ArtifactStore):
     def url(self):
         return self.conn
 
-    def _delete_bytes(self, file_id: str):
+    def _delete_artifact(self, file_id: str):
         """
         Delete artifact from artifact store
         :param file_id: File id uses to identify artifact in store
         """
-        os.remove(f'{self.conn}/{file_id}')
+        path = os.path.join(self.conn, file_id)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
 
     def drop(self, force: bool = False):
         """
@@ -68,6 +73,29 @@ class FileSystemArtifactStore(ArtifactStore):
     def _load_bytes(self, file_id: str) -> bytes:
         with open(os.path.join(self.conn, file_id), 'rb') as f:
             return f.read()
+
+    def _save_file(self, file_path: str, file_id: str):
+        """
+        Save file in artifact store and return the relative path
+        return the relative path {file_id}/{name}
+        """
+        path = Path(file_path)
+        name = path.name
+        file_id_folder = os.path.join(self.conn, file_id)
+        os.makedirs(file_id_folder, exist_ok=True)
+        save_path = os.path.join(file_id_folder, name)
+        logging.info(f"Copying file {file_path} to {save_path}")
+        if path.is_dir():
+            shutil.copytree(file_path, save_path)
+        else:
+            shutil.copy(file_path, save_path)
+        # return the relative path {file_id}/{name}
+        return os.path.join(file_id, name)
+
+    def _load_file(self, file_id: str) -> str:
+        """Return the path to the file in the artifact store"""
+        logging.info(f"Loading file {file_id} from {self.conn}")
+        return os.path.join(self.conn, file_id)
 
     def disconnect(self):
         """

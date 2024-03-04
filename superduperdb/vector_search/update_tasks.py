@@ -39,18 +39,23 @@ def copy_vectors(
     :param ids: List of ids which were observed as added/updated documents.
     :param db: A ``DB`` instance.
     """
+
     vi = db.vector_indices[vector_index]
     if isinstance(query, dict):
         # ruff: noqa: E501
         query: CompoundSelect = Serializable.decode(query)  # type: ignore[no-redef]
     assert isinstance(query, CompoundSelect)
-    select = query.select_using_ids(ids)
+    if not ids:
+        select = query
+    else:
+        select = query.select_using_ids(ids)
     docs = db.select(select)
     docs = [doc.unpack() for doc in docs]
     key = vi.indexing_listener.key
     model = vi.indexing_listener.model.identifier
     version = vi.indexing_listener.model.version
     # TODO: Refactor the below logic
+    vectors = []
     if isinstance(db.databackend, MongoDataBackend):
         vectors = [
             {
@@ -65,7 +70,7 @@ def copy_vectors(
 
         vectors = [
             {
-                'vector': doc['_outputs.{key}.{model}.{version}'].x,
+                'vector': doc[f'_outputs.{key}.{model}.{version}'],
                 'id': str(doc[INPUT_KEY]),
             }
             for doc in docs
@@ -73,6 +78,8 @@ def copy_vectors(
     for r in vectors:
         if hasattr(r['vector'], 'numpy'):
             r['vector'] = r['vector'].numpy()
-    db.fast_vector_searchers[vi.identifier].add(
-        [VectorItem(**vector) for vector in vectors]
-    )
+
+    if vectors:
+        db.fast_vector_searchers[vi.identifier].add(
+            [VectorItem(**vector) for vector in vectors]
+        )

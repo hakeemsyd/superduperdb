@@ -11,23 +11,71 @@ from torch.utils import data
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-import superduperdb as s
 from superduperdb import logging
 from superduperdb.backends.base.query import Select
 from superduperdb.backends.query_dataset import QueryDataset
 from superduperdb.base.datalayer import Datalayer
-from superduperdb.base.document import Document
 from superduperdb.base.serializable import Serializable
+from superduperdb.components.component import ensure_initialized
 from superduperdb.components.dataset import Dataset
 from superduperdb.components.datatype import (
     DataType,
-    Encodable,
     dill_serializer,
     torch_serializer,
 )
 from superduperdb.components.metric import Metric
-from superduperdb.components.model import Model, _TrainingConfiguration
+from superduperdb.components.model import (
+    CallableInputs,
+    Mapping,
+    Signature,
+    _DeviceManaged,
+    _Fittable,
+    _Predictor,
+    _TrainingConfiguration,
+)
 from superduperdb.ext.torch.utils import device_of, eval, to_device
+from superduperdb.jobs.job import Job
+
+
+def torchmodel(cls):
+    """
+    Decorate a `torch.nn.Module` so that when it is invoked,
+    the result is a `TorchModel`.
+
+    :param cls: Class to decorate
+    """
+
+    def factory(
+        identifier: str,
+        *args,
+        preprocess: t.Optional[t.Callable] = None,
+        postprocess: t.Optional[t.Callable] = None,
+        collate_fn: t.Optional[t.Callable] = None,
+        optimizer_state: t.Optional[t.Any] = None,
+        forward_method: str = '__call__',
+        train_forward_method: str = '__call__',
+        loader_kwargs: t.Dict = dc.field(default_factory=lambda: {}),
+        preprocess_signature: str = Signature.singleton,
+        forward_signature: str = Signature.singleton,
+        postprocess_signature: str = Signature.singleton,
+        **kwargs,
+    ):
+        return TorchModel(
+            identifier=identifier,
+            object=cls(*args, **kwargs),
+            preprocess=preprocess,
+            postprocess=postprocess,
+            collate_fn=collate_fn,
+            optimizer_state=optimizer_state,
+            forward_method=forward_method,
+            train_forward_method=train_forward_method,
+            loader_kwargs=loader_kwargs,
+            preprocess_signature=preprocess_signature,
+            forward_signature=forward_signature,
+            postprocess_signature=postprocess_signature,
+        )
+
+    return factory
 
 
 class BasicDataset(data.Dataset):
@@ -38,21 +86,23 @@ class BasicDataset(data.Dataset):
     :param transform: function
     """
 
-    def __init__(self, documents, transform):
+    def __init__(self, items, transform, signature):
         super().__init__()
-        self.documents = documents
+        self.items = items
         self.transform = transform
+        self.signature = signature
 
     def __len__(self):
-        return len(self.documents)
+        return len(self.items)
 
     def __getitem__(self, item):
-        document = self.documents[item]
-        if isinstance(document, Document):
-            document = document.unpack()
-        elif isinstance(document, Encodable):
-            document = document.x
-        return self.transform(document)
+        out = self.items[item]
+        if self.transform is not None:
+            from superduperdb.components.model import Model
+
+            args, kwargs = Model.handle_input_type(out, self.signature)
+            return self.transform(*args, **kwargs)
+        return out
 
 
 @dc.dataclass
@@ -87,35 +137,65 @@ class TorchTrainerConfiguration(_TrainingConfiguration):
     optimizer_cls: t.Any = dc.field(default_factory=lambda: torch.optim.Adam)
     optimizer_kwargs: t.Dict = dc.field(default_factory=dict)
     target_preprocessors: t.Optional[t.Dict] = None
+    pass_kwargs: bool = False
 
 
 @dc.dataclass(kw_only=True)
-class TorchModel(Model):
+class TorchModel(_Predictor, _Fittable, _DeviceManaged):
     _artifacts: t.ClassVar[t.Sequence[t.Tuple[str, DataType]]] = (
         ('object', dill_serializer),
         ('optimizer_state', torch_serializer),
     )
 
-    num_directions: int = 2
+    object: torch.nn.Module
+    preprocess: t.Optional[t.Callable] = None
+    postprocess: t.Optional[t.Callable] = None
+    collate_fn: t.Optional[t.Callable] = None
     optimizer_state: t.Optional[t.Any] = None
     forward_method: str = '__call__'
     train_forward_method: str = '__call__'
+    loader_kwargs: t.Dict = dc.field(default_factory=lambda: {})
+    preprocess_signature: str = Signature.singleton
+    forward_signature: str = Signature.singleton
+    postprocess_signature: str = Signature.singleton
 
     def __post_init__(self, artifacts):
         super().__post_init__(artifacts=artifacts)
-
-        if self.model_to_device_method:
-            s.logging.debug(
-                f'{self.model_to_device_method} will be overriden with `to`'
-            )
-
-        self.model_to_device_method = 'to'
-        self.object.serializer = 'torch'
 
         if self.optimizer_state is not None:
             self.optimizer.load_state_dict(self.optimizer_state)
 
         self._validation_set_cache = {}
+
+    @property
+    def signature(self):
+        if self.preprocess:
+            return self.preprocess_signature
+        return self.forward_signature
+
+    @signature.setter
+    def signature(self, signature):
+        if self.preprocess:
+            self.preprocess_signature = signature
+        else:
+            self.forward_signature = signature
+
+    @property
+    def inputs(self) -> CallableInputs:
+        return CallableInputs(
+            self.object.forward if not self.preprocess else self.preprocess, {}
+        )
+
+    def schedule_jobs(
+        self,
+        db: Datalayer,
+        dependencies: t.Sequence[Job] = (),
+    ) -> t.Sequence[t.Any]:
+        jobs = _Fittable.schedule_jobs(self, db, dependencies=dependencies)
+        jobs.extend(
+            _Predictor.schedule_jobs(self, db, dependencies=[*dependencies, *jobs])
+        )
+        return jobs
 
     def to(self, device):
         self.object.to(device)
@@ -181,36 +261,49 @@ class TorchModel(Model):
                     io.BytesIO(state.pop('object_bytes'))
                 )
 
-    def _predict_one(self, x):
+    @ensure_initialized
+    def predict_one(self, *args, **kwargs):
         with torch.no_grad(), eval(self.object):
             if self.preprocess is not None:
-                x = self.preprocess(x)
-            x = to_device(x, device_of(self.object))
-            singleton_batch = create_batch(x)
+                out = self.preprocess(*args, **kwargs)
+                args, kwargs = self.handle_input_type(out, self.signature)
+
+            args, kwargs = to_device((args, kwargs), self.device)
+            args, kwargs = create_batch((args, kwargs))
+
             method = getattr(self.object, self.forward_method)
-            output = method(singleton_batch)
+            output = method(*args, **kwargs)
             output = to_device(output, 'cpu')
             args = unpack_batch(output)[0]
             if self.postprocess is not None:
                 args = self.postprocess(args)
             return args
 
-    def _predict(self, x, one: bool = False, **kwargs):  # type: ignore[override]
+    @ensure_initialized
+    def predict(self, dataset: t.Union[t.List, QueryDataset]) -> t.List:
         with torch.no_grad(), eval(self.object):
-            if one:
-                return self._predict_one(x)
-            inputs = BasicDataset(x, self.preprocess or (lambda x: x))
-            loader = torch.utils.data.DataLoader(inputs, **kwargs)
+            inputs = BasicDataset(
+                items=dataset,
+                transform=self.preprocess,
+                signature=self.signature,
+            )
+            loader = torch.utils.data.DataLoader(
+                inputs, **self.loader_kwargs, collate_fn=self.collate_fn
+            )
             out = []
             for batch in tqdm(loader, total=len(loader)):
                 batch = to_device(batch, device_of(self.object))
-
+                args, kwargs = self.handle_input_type(batch, self.signature)
                 method = getattr(self.object, self.forward_method)
-                tmp = method(batch)
+                tmp = method(*args, **kwargs, **self.predict_kwargs)
                 tmp = to_device(tmp, 'cpu')
                 tmp = unpack_batch(tmp)
                 if self.postprocess:
-                    tmp = [self.postprocess(t) for t in tmp]
+                    tmp = [
+                        self.handle_input_type(x, self.postprocess_signature)
+                        for x in tmp
+                    ]
+                    tmp = [self.postprocess(*x[0], **x[1]) for x in tmp]
                 out.extend(tmp)
             return out
 
@@ -256,17 +349,18 @@ class TorchModel(Model):
             return True
         return False
 
+    @ensure_initialized
     def _fit(
         self,
         X: t.Any,
         *,
         y: t.Optional[t.Any] = None,
-        configuration: TorchTrainerConfiguration,  # type: ignore[override]
+        configuration: TorchTrainerConfiguration,
         data_prefetch: bool = False,
         db: t.Optional[Datalayer] = None,
         metrics: t.Optional[t.Sequence[Metric]] = None,
         select: t.Optional[t.Union[Select, t.Dict]] = None,
-        validation_sets: t.Optional[t.Sequence[t.Union[str, Dataset]]] = None,
+        validation_sets: t.Optional[t.Sequence[Dataset]] = None,
     ):
         if configuration is not None:
             self.training_configuration = configuration
@@ -311,20 +405,9 @@ class TorchModel(Model):
         return self.object(X)
 
     def extract_batch_key(self, batch, key: t.Union[t.List[str], str]):
-        if isinstance(key, str):
-            return batch[key]
         return [batch[k] for k in key]
 
-    def extract_batch(self, batch):
-        if self.train_y is not None:
-            return [
-                self.extract_batch_key(batch, self.train_X),
-                self.extract_batch_key(batch, self.train_y),
-            ]
-        return [self.extract_batch_key(batch, self.train_X)]
-
     def take_step(self, batch, optimizers):
-        batch = self.extract_batch(batch)
         outputs = self.train_forward(*batch)
         objective_value = self.training_configuration.objective(*outputs)
         for opt in optimizers:
@@ -338,7 +421,6 @@ class TorchModel(Model):
         objective_values = []
         with self.evaluating(), torch.no_grad():
             for batch in valid_dataloader:
-                batch = self.extract_batch(batch)
                 objective_values.append(
                     self.training_configuration.objective(
                         *self.train_forward(*batch)
@@ -389,56 +471,40 @@ class TorchModel(Model):
                         return
                 iteration += 1
 
-    def train_preprocess(self):
-        preprocessors = {}
-        if isinstance(self.train_X, str):
-            preprocessors[self.train_X] = (
-                self.preprocess if self.preprocess else lambda x: x
-            )
-        else:
-            for model, X in zip(self.models, self.train_X):
-                preprocessors[X] = (
-                    model.preprocess if model.preprocess is not None else lambda x: x
-                )
-        if self.train_y is not None:
-            if (
-                isinstance(self.train_y, str)
-                and self.training_configuration.target_preprocessors
-            ):
-                preprocessors[
-                    self.train_y
-                ] = self.training_configuration.target_preprocessors.get(
-                    self.train_y, lambda x: x
-                )
-            elif isinstance(self.train_y, str):
-                preprocessors[self.train_y] = lambda x: x
-            elif (
-                isinstance(self.train_y, list)
-                and self.training_configuration.target_preprocessors
-            ):
-                for y in self.train_y:
-                    preprocessors[
-                        y
-                    ] = self.training_configuration.target_preprocessors.get(
-                        y, lambda x: x
-                    )
-        return lambda r: {k: preprocessors[k](r[k]) for k in preprocessors}
-
     def _get_data(self, db: t.Optional[Datalayer]):
         if self.training_select is None:
             raise ValueError('self.training_select cannot be None')
+        preprocess = self.preprocess or (lambda x: x)
         train_data = QueryDataset(
             select=self.training_select,
-            keys=self.training_keys,
+            mapping=Mapping(
+                [self.train_X, self.train_y]  # type: ignore[list-item]
+                if self.train_y
+                else self.train_X,  # type: ignore[arg-type]
+                signature='*args',
+            ),
             fold='train',
-            transform=self.train_preprocess(),
+            transform=(
+                preprocess
+                if not self.train_y
+                else lambda x, y: (preprocess(x), y)  # type: ignore[misc]
+            ),
             db=db,
         )
         valid_data = QueryDataset(
             select=self.training_select,
-            keys=self.training_keys,
+            mapping=Mapping(
+                [self.train_X, self.train_y]  # type: ignore[list-item]
+                if self.train_y
+                else self.train_X,  # type: ignore[arg-type]
+                signature='*args',
+            ),
             fold='valid',
-            transform=self.train_preprocess(),
+            transform=(
+                preprocess
+                if not self.train_y
+                else lambda x, y: (preprocess(x), y)  # type: ignore[misc]
+            ),
             db=db,
         )
         return train_data, valid_data

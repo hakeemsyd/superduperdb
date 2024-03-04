@@ -42,7 +42,7 @@ class ArtifactStore(ABC):
         pass
 
     @abstractmethod
-    def _delete_bytes(self, file_id: str):
+    def _delete_artifact(self, file_id: str):
         """
         Delete artifact from artifact store
         :param file_id: File id uses to identify artifact in store
@@ -50,7 +50,7 @@ class ArtifactStore(ABC):
 
     def delete(self, r: t.Dict):
         if '_content' in r and 'file_id' in r['_content']:
-            return self._delete_bytes(r['_content']['file_id'])
+            return self._delete_artifact(r['_content']['file_id'])
         for v in r.values():
             if isinstance(v, dict):
                 self.delete(v)
@@ -84,6 +84,12 @@ class ArtifactStore(ABC):
 
     @abstractmethod
     def _save_bytes(self, serialized: bytes, file_id: str):
+        """Save bytes in artifact store""" ""
+        pass
+
+    @abstractmethod
+    def _save_file(self, file_path: str, file_id: str) -> str:
+        """Save file in artifact store and return file_id"""
         pass
 
     def save_artifact(self, r: t.Dict):
@@ -95,18 +101,23 @@ class ArtifactStore(ABC):
                   and optional fields
                   {'file_id', 'uri'}
         """
-        assert 'bytes' in r, 'serialized bytes are missing!'
-        assert 'datatype' in r, 'no datatype specified!'
-        datatype = self.serializers[r['datatype']]
-        uri = r.get('uri')
-        file_id = None
-        if uri is not None:
-            file_id = _construct_file_id_from_uri(uri)
+        if r.get('leaf_type') == 'file':
+            assert 'file_id' in r, 'file_id is missing!'
+            file_id = self._save_file(r['uri'], r['file_id'])
         else:
-            file_id = hashlib.sha1(r['bytes']).hexdigest()
-        if r.get('directory'):
-            file_id = os.path.join(datatype.directory, file_id)
-        self._save_bytes(r['bytes'], file_id=file_id)
+            assert 'bytes' in r, 'serialized bytes are missing!'
+            assert 'datatype' in r, 'no datatype specified!'
+            datatype = self.serializers[r['datatype']]
+            uri = r.get('uri')
+            file_id = r.get('file_id')
+            if uri is not None:
+                file_id = _construct_file_id_from_uri(uri)
+            else:
+                file_id = r.get('sha1') or hashlib.sha1(r['bytes']).hexdigest()
+            if r.get('directory'):
+                file_id = os.path.join(datatype.directory, file_id)
+            self._save_bytes(r['bytes'], file_id=file_id)
+            del r['bytes']
         r['file_id'] = file_id
         return r
 
@@ -114,6 +125,15 @@ class ArtifactStore(ABC):
     def _load_bytes(self, file_id: str) -> bytes:
         """
         Load bytes from artifact store.
+
+        :param file_id: Identifier of artifact in the store
+        """
+        pass
+
+    @abstractmethod
+    def _load_file(self, file_id: str) -> str:
+        """
+        Load file from artifact store and return path
 
         :param file_id: Identifier of artifact in the store
         """
@@ -129,12 +149,16 @@ class ArtifactStore(ABC):
 
         datatype = self.serializers[r['datatype']]
         file_id = r.get('file_id')
-        uri = r.get('uri')
-        if file_id is None:
-            assert uri is not None, '"uri" and "file_id" can\'t both be None'
-            file_id = _construct_file_id_from_uri(uri)
-        bytes = self._load_bytes(file_id)
-        return datatype.decoder(bytes)
+        if r.get('encodable') == 'file':
+            x = self._load_file(file_id)
+        else:
+            # We should always have file_id available at load time (because saved)
+            uri = r.get('uri')
+            if file_id is None:
+                assert uri is not None, '"uri" and "file_id" can\'t both be None'
+                file_id = _construct_file_id_from_uri(uri)
+            x = self._load_bytes(file_id)
+        return datatype.decode_data(x)
 
     def save(self, r: t.Dict) -> t.Dict:
         """
@@ -142,13 +166,12 @@ class ArtifactStore(ABC):
         :param artifacts: List of ``Artifact`` instances
         """
         if isinstance(r, dict):
-            if (
-                '_content' in r
-                and r['_content']['leaf_type'] == 'encodable'
-                and 'bytes' in r['_content']
-            ):
+            if '_content' in r and r['_content']['leaf_type'] in {
+                'artifact',
+                'file',
+                'lazy_artifact',
+            }:
                 self.save_artifact(r['_content'])
-                del r['_content']['bytes']
             else:
                 for k in r:
                     self.save(r[k])

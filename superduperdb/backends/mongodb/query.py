@@ -115,7 +115,7 @@ class Find(QueryComponent):
 
         :param **kwargs: key=model/version or key=model pairs
         """
-        args = list(self.args[:])
+        args = copy.deepcopy(list(self.args[:]))
         if not args:
             args = [{}]
         if not args[1:]:
@@ -137,7 +137,7 @@ class Find(QueryComponent):
         return Find(
             name=self.name,
             type=self.type,
-            args=self.args,
+            args=args,
             kwargs=self.kwargs,
             output_fields=kwargs,
         )
@@ -308,7 +308,6 @@ class Aggregate(Select):
             raw_cursor=cursor,
             id_field='_id',
             db=db,
-            reference=reference,
         )
 
 
@@ -375,7 +374,6 @@ class MongoCompoundSelect(CompoundSelect):
                 id_field='_id',
                 scores=scores,
                 db=db,
-                reference=reference,
             )
         elif isinstance(output, dict):
             if reference and CFG.hybrid_storage:
@@ -536,7 +534,21 @@ class MongoDelete(Delete):
             self.table_or_collection.identifier
         )
         if self.one:
-            return collection.delete_one(*self.args, **self.kwargs)
+            ids = []
+            if '_id' in self.kwargs:
+                ids = [str(self.kwargs['_id'])]
+            for arg in self.args:
+                if isinstance(arg, dict) and '_id' in arg:
+                    ids = [str(arg['_id'])]
+            result = collection.delete_one(*self.args, **self.kwargs)
+            if result.deleted_count == 1:
+                if not ids:
+                    deleted_document = collection.find_one(*self.args, **self.kwargs)
+                    return [str(deleted_document['_id'])]
+                return ids
+            else:
+                return []
+
         delete_result = collection.delete_many(*self.args, **self.kwargs)
         return delete_result.deleted_ids
 

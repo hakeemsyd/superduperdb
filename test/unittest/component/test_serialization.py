@@ -10,13 +10,13 @@ from test.db_config import DBConfig
 
 from sklearn.svm import SVC
 
-from superduperdb.components.model import Model
+from superduperdb.components.model import ObjectModel
 from superduperdb.ext.sklearn.model import Estimator
 
 
 @pytest.mark.skipif(not torch, reason='Torch not installed')
 def test_model():
-    m = Model(
+    m = ObjectModel(
         identifier='test',
         datatype=tensor(torch.float, shape=(32,)),
         object=torch.nn.Linear(13, 18),
@@ -44,4 +44,5 @@ def test_sklearn(db):
     assert db.show('datatype') == ['torch.float32[32]']
 
     reloaded = db.load(type_id='model', identifier='test')
+    reloaded.init()
     assert isinstance(reloaded.object, SVC)

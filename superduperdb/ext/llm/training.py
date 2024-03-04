@@ -1,5 +1,6 @@
 import dataclasses as dc
 import os
+import re
 import typing as t
 from copy import deepcopy
 from functools import wraps
@@ -10,7 +11,6 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
-    Trainer,
     TrainerCallback,
     TrainingArguments,
 )
@@ -19,12 +19,44 @@ from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from superduperdb import logging
 from superduperdb.base.build import build_datalayer
 from superduperdb.base.config import Config
+from superduperdb.components.component import Component
+from superduperdb.components.datatype import DataType, file_serializer
+from superduperdb.misc.hash import random_sha1
 
 if t.TYPE_CHECKING:
     from datasets import Dataset
 
     from superduperdb.base.datalayer import Datalayer
     from superduperdb.ext.llm import LLM
+
+
+@dc.dataclass(kw_only=True)
+class Checkpoint(Component):
+    path: t.Optional[str]
+    step: int
+    _artifacts: t.ClassVar[t.Sequence[t.Tuple[str, DataType]]] = (
+        ("path", file_serializer),
+    )
+    type_id: t.ClassVar[str] = "checkpoint"
+
+    def __post_init__(self, artifacts):
+        super().__post_init__(artifacts)
+        self.version = int(self.step)
+
+    @property
+    def uri(self):
+        return f"checkpoint://{self.identifier}/{self.step}"
+
+    @staticmethod
+    def check_uri(uri):
+        return re.match(r"^checkpoint://.*?/\d+$", uri) is not None
+
+    @staticmethod
+    def parse_uri(uri):
+        if not Checkpoint.check_uri(uri):
+            raise ValueError(f"Invalid uri: {uri}")
+        *_, identifier, step = uri.split("/")
+        return identifier, int(step)
 
 
 class LLMCallback(TrainerCallback):
@@ -39,6 +71,7 @@ class LLMCallback(TrainerCallback):
         self.identifier = identifier
         self.db = db
         self.llm = llm
+        self.id = random_sha1()
 
         # If we run training on remote, we need to provide identifier and cfg,
         # then can connect to db and load llm
@@ -54,6 +87,8 @@ class LLMCallback(TrainerCallback):
 
     def on_save(self, args, state, control, **kwargs):
         """Event called after a checkpoint save."""
+        if not state.is_world_process_zero:
+            return
 
         self.check_init()
         checkpoint_path = transformers.trainer.get_last_checkpoint(args.output_dir)
@@ -61,16 +96,41 @@ class LLMCallback(TrainerCallback):
             logging.warn("No checkpoint found, skip saving checkpoint")
             return
 
-        # ???
-        # self.llm.adapter_id = Artifact(checkpoint_path, serializer="zip")
-        self.llm.adapter_id = checkpoint_path
-        self.db.replace(self.llm, upsert=True)
+        checkpoint = Checkpoint(
+            identifier=self.id, path=checkpoint_path, step=state.global_step
+        )
+        self.db.add(checkpoint)
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        """Event called after an evaluation."""
+        if not state.is_world_process_zero:
+            return
+
+        self.check_init()
+        self.llm.append_metrics(state.log_history[-1])
+
+    def on_train_end(self, args, state, control, **kwargs):
+        self.check_init()
+        # update the llm to db after training, will save the adapter_id and metrics
+
+        if state.best_model_checkpoint:
+            step = state.best_model_checkpoint.split("-")[-1]
+            checkpoint = Checkpoint(
+                identifier=self.id, path=state.best_model_checkpoint, step=step
+            )
+            self.db.add(checkpoint)
+
+        checkpoint = self.db.load(Checkpoint.type_id, self.id)
+        self.llm.adapter_id = checkpoint
+        self.db.replace(self.llm)
 
     def check_init(self):
         # Rebuild datalayer for the new process
         if self.db is None:
             self.db = build_datalayer(self.cfg)
             self.llm = self.db.load("model", self.identifier)
+
+        assert self.llm is not None
 
 
 @dc.dataclass
@@ -97,7 +157,7 @@ class LLMTrainingArguments(TrainingArguments):
         lora_bias (`str`, *optional*, defaults to "none"):
             Lora bias.
 
-        max_length (`int`, *optional*, defaults to 512):
+        max_seq_length (`int`, *optional*, defaults to 512):
             Maximum source sequence length during training.
         log_to_db (`bool`, *optional*, defaults to True):
             Log training to db.
@@ -112,10 +172,11 @@ class LLMTrainingArguments(TrainingArguments):
     lora_r: int = 8
     lora_alpha: int = 16
     lora_dropout: float = 0.05
-    lora_target_modules: t.Optional[t.List[str]] = None
+    lora_target_modules: t.Union[t.List[str], str] = "all-linear"
     lora_bias: t.Literal["none", "all", "lora_only"] = "none"
     bits: t.Optional[int] = None
-    max_length: int = 512
+    max_seq_length: int = 512
+    setup_chat_format: bool = False
     log_to_db: bool = False
 
     def __post_init__(self):
@@ -188,57 +249,17 @@ def train(
     """
 
     training_args = LLMTrainingArguments(**training_config)
-    if X:
-        tokenizer = AutoTokenizer.from_pretrained(
-            **tokenizer_kwargs,
-        )
-        tokenizer.model_max_length = training_config.get(
-            "max_length", training_args.max_length
-        )
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        train_dataset = train_dataset.map(
-            lambda example: tokenize(tokenizer, example, X, y),
-            remove_columns=[
-                X,
-            ],
-        )
-
-        if isinstance(eval_datasets, dict):
-            eval_datasets = {
-                k: v.map(
-                    lambda example: tokenize(tokenizer, example, X, y),
-                    remove_columns=[
-                        X,
-                    ],
-                )
-                for k, v in eval_datasets.items()
-            }
-        else:
-            eval_datasets = eval_datasets.map(
-                lambda example: tokenize(tokenizer, example, X, y),
-                remove_columns=[
-                    X,
-                ],
-            )
+    dataset_text_field = kwargs.get("dataset_text_field", X)
+    if dataset_text_field is not None:
+        kwargs["dataset_text_field"] = dataset_text_field
 
     on_ray = on_ray or bool(ray_address) or bool(ray_configs)
 
     # Auto detect multi-GPUs and use ray to run data parallel training
     # If not todo this, will run on a bad parallel mode
     if not on_ray and torch.cuda.device_count() > 1:
-        logging.warn("Detected multi-GPUs, will use ray to run training on multi-GPUs")
         on_ray = True
-        from ray.train import ScalingConfig
-
-        ray_configs = {
-            "scaling_config": ScalingConfig(
-                num_workers=torch.cuda.device_count(),
-                use_gpu=True,
-            )
-        }
-        logging.warn(f"Set ray_configs to {ray_configs}")
-        logging.warn("Suggest to set ray_configs manually for better performance")
+        logging.warn("Detected multi-GPUs, will use ray to run training on multi-GPUs")
 
     log_to_db = training_args.log_to_db
 
@@ -374,18 +395,25 @@ def train_func(
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.model_max_length = training_args.max_length or tokenizer.model_max_length
+
+    from trl import setup_chat_format
+    from trl.trainer import SFTTrainer
+
+    if training_args.setup_chat_format:
+        logging.info("Setup chat format")
+        model, tokenizer = setup_chat_format(model, tokenizer)
 
     if training_args.use_lora:
         logging.info("Preparing LoRA training")
         model = prepare_lora_training(model, training_args)
 
-    trainer = Trainer(
+    trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_datasets,
+        max_seq_length=training_args.max_seq_length,
         **kwargs,
     )
     if trainer_prepare_func is not None:
@@ -447,17 +475,8 @@ def ray_train(
         os.environ["OMP_NUM_THREADS"] = str(
             train.get_context().get_trial_resources().bundles[-1].get("CPU", 1)
         )
-        ray_train_ds = train.get_dataset_shard("train")
-        ray_eval_ds = train.get_dataset_shard("eval")
 
-        # TODO: Rebuild the datasets.Dataset to train_func
-        # So that we can improve compatibility with llm training framework
-        # For example: Dataset.from_generator(ray_train_ds.iter_rows)
-        train_batch_size = train_loop_config["per_device_train_batch_size"]
-        eval_batch_size = train_loop_config["per_device_eval_batch_size"]
-        train_ds_iterable = ray_train_ds.iter_torch_batches(batch_size=train_batch_size)
-        eval_ds_iterable = ray_eval_ds.iter_torch_batches(batch_size=eval_batch_size)
-
+        logging.info(f"Start training on ray, train_dataset: {len(train_dataset)}")
         kwargs["trainer_prepare_func"] = trainer_prepare_func
 
         # Note: Set use_reentrant to False when using ray+lora+gradient_checkpointing
@@ -479,51 +498,34 @@ def ray_train(
         train_loop_args = LLMTrainingArguments(**train_loop_config)
         # Build the training_args on remote machine
         train_loop_args.build()
-        return train_func(
-            train_loop_args, train_ds_iterable, eval_ds_iterable, **kwargs
-        )
+        return train_func(train_loop_args, train_dataset, eval_datasets, **kwargs)
 
     if ray_address is not None:
         ray.init(address=ray_address, ignore_reinit_error=True)
 
-    ray_datasets = {
-        "train": ray.data.from_huggingface(train_dataset),
-        "eval": ray.data.from_huggingface(eval_datasets),
-    }
-
-    ray_configs = ray_configs or {}
+    if not ray_configs:
+        gpu_count = torch.cuda.device_count()
+        ray_configs = {
+            "scaling_config": ScalingConfig(
+                num_workers=torch.cuda.device_count() or 1,
+                use_gpu=bool(gpu_count),
+            )
+        }
+        logging.warn(f"Set ray_configs to {ray_configs}")
+        logging.warn("Suggest to set ray_configs manually for better performance")
     if "scaling_config" not in ray_configs:
         raise ValueError("Please provide scaling_config")
 
     if "run_config" not in ray_configs:
         logging.warn("No run_config provided")
 
-    # Auto detect the max_steps from training_config if not provided
-    # Can't use num_train_epochs, because it's not compatible with ray
-    scaling_config: ScalingConfig = ray_configs["scaling_config"]
-    if training_args.max_steps == -1 and isinstance(scaling_config.num_workers, int):
-        logging.info("Auto detect max_steps from training_config")
-
-        num_workers = scaling_config.num_workers
-        per_device_train_batch_size = training_args.per_device_train_batch_size
-        gradient_accumulation_steps = training_args.gradient_accumulation_steps
-
-        step_size = (
-            num_workers * per_device_train_batch_size * gradient_accumulation_steps
-        )
-        dataset_size = len(train_dataset)
-        num_train_epochs = training_args.num_train_epochs
-        max_steps = int(num_train_epochs * dataset_size / step_size)
-
-        training_args.max_steps = max_steps
-        logging.info(f"num_workers: {num_workers}")
-
-        logging.info(f"Set max_steps to {max_steps}")
+    logging.info(f"Start training on ray, ray_configs: {ray_configs}")
 
     trainer = TorchTrainer(
         train_loop_per_worker=ray_train_func,
         train_loop_config=training_args.to_dict(),
-        datasets=ray_datasets,
+        # Don't use ray dataset, because it is not compatible with ConstantLengthDataset
+        # when running on multiple GPUs
         **ray_configs,
     )
 
@@ -544,8 +546,7 @@ def prepare_lora_training(model, config: LLMTrainingArguments):
     lora_config = LoraConfig(
         r=config.lora_r,
         lora_alpha=config.lora_alpha,
-        target_modules=config.lora_target_modules
-        or get_lora_target_modules(model, config.bits),
+        target_modules=config.lora_target_modules,
         lora_dropout=config.lora_dropout,
         bias=config.lora_bias,
         task_type="CAUSAL_LM",
@@ -570,30 +571,6 @@ def prepare_lora_training(model, config: LLMTrainingArguments):
     if config.local_rank == 0:
         model.print_trainable_parameters()
     return model
-
-
-def get_lora_target_modules(model, bits):
-    """Find the LoRA target modules in the model."""
-    try:
-        import bitsandbytes as bnb
-    except Exception as e:
-        raise ImportError("Please install bitsandbytes to use LoRA training") from e
-
-    if bits == 4:
-        cls = bnb.nn.Linear4bit
-    elif bits == 8:
-        cls = bnb.nn.Linear8bitLt
-    else:
-        cls = torch.nn.Linear
-
-    lora_module_names = set()
-    for name, module in model.named_modules():
-        if isinstance(module, cls):
-            names = name.split(".")
-            lora_module_names.add(names[0] if len(names) == 1 else names[-1])
-
-    lora_module_names.discard("lm_head")
-    return list(lora_module_names)
 
 
 def create_quantization_config(config: LLMTrainingArguments):
