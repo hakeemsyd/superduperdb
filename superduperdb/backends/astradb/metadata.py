@@ -137,13 +137,15 @@ class AstraMetaDataStore(MetaDataStore):
 
     def show_components(self, type_id: str, **kwargs) -> t.List[t.Union[t.Any, str]]:
         distinct_values = []
+        results = []
         response_generator = self.component_collection.paginated_find(
             filter={'type_id': type_id, **kwargs}
         )
         for document in response_generator:
             if document['identifier'] not in distinct_values:
-                distinct_values.append(document)
-        return distinct_values
+                distinct_values.append(document['identifier'])
+                results.append(document)
+        return results
 
     def show_component_versions(
             self, type_id: str, identifier: str
@@ -152,10 +154,12 @@ class AstraMetaDataStore(MetaDataStore):
             filter={'type_id': type_id, 'identifier': identifier}
         )
         distinct_values = []
+        results = []
         for doc in result:
             if doc['version'] not in distinct_values:
-                distinct_values.append(doc)
-        return distinct_values
+                distinct_values.append(doc['version'])
+                results.append(doc)
+        return results
 
     def show_job(self, job_id: str):
         return self.job_collection.find_one(filter={'identifier': job_id}).get('data')['document']
