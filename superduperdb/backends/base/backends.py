@@ -11,6 +11,7 @@ from superduperdb.vector_search.atlas import MongoAtlasVectorSearcher
 from superduperdb.vector_search.in_memory import InMemoryVectorSearcher
 from superduperdb.vector_search.lance import LanceVectorSearcher
 from superduperdb.backends.astradb.data_backend import AstraDataBackend
+from superduperdb.backends.astradb.metadata import AstraMetaDataStore
 
 data_backends = {
     'mongodb': MongoDataBackend,
@@ -26,6 +27,7 @@ artifact_stores = {
 metadata_stores = {
     'mongodb': MongoMetaDataStore,
     'sqlalchemy': SQLAlchemyMetadata,
+    'astradb': AstraMetaDataStore
 }
 
 vector_searcher_implementations = {
