@@ -1,5 +1,6 @@
 from ibis.backends.base import BaseBackend
 from pymongo import MongoClient
+from superduperdb.backends.astradb.metadata import AstraMetaDataStore
 
 from superduperdb.backends.ibis.data_backend import IbisDataBackend
 from superduperdb.backends.local.artifacts import FileSystemArtifactStore
@@ -24,6 +25,7 @@ artifact_stores = {
 metadata_stores = {
     'mongodb': MongoMetaDataStore,
     'sqlalchemy': SQLAlchemyMetadata,
+    'astraDB': AstraMetaDataStore,
 }
 
 vector_searcher_implementations = {
