@@ -140,7 +140,7 @@ class Find(QueryComponent):
         )
 
     def select_using_ids(self, ids):
-        ids = [ObjectId(id) for id in ids]
+        # ids = [ObjectId(id) for id in ids]
         args = list(self.args)[:]
         if not args:
             args = [{}]
@@ -159,13 +159,13 @@ class Find(QueryComponent):
                 {
                     '$and': [
                         self.args[0],
-                        {f'_outputs.{key}.{model}.{version}': {'$exists': 0}},
+                        {f'_outputs.{key}.{model}.{version}': {'$exists': False}},
                     ]
                 },
                 *self.args[1:],
             ]
         else:
-            args = [{f'_outputs.{key}.{model}': {'$exists': 0}}]
+            args = [{f'_outputs.{key}.{model}': {'$exists': False}}]
 
         if len(args) == 1:
             args.append({})
@@ -388,12 +388,14 @@ class AstraQueryLinker(QueryLinker):
 
 @dc.dataclass(repr=False)
 class AstraInsert(Insert):
+    print("inside astra insert many")
     one: bool = False
 
     def execute(self, db):
         collection = db.databackend.get_table_or_collection(
             self.table_or_collection.identifier
         )
+        print("inside the astra insert")
         documents = [r.encode() for r in self.documents]
         response = collection.chunked_insert_many(documents=documents, chunk_size=20)
         inserted_ids = []

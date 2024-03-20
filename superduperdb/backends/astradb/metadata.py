@@ -37,9 +37,10 @@ class AstraMetaDataStore(MetaDataStore):
         """Initialize collections."""
         table_names = self.get_table_names()
         for table_name in table_names:
-            self.db.create_collection(collection_name=table_name)
+            if table_name != "cdc_tables":
+                self.db.create_collection(collection_name=table_name)
         self.meta_collection = AstraDBCollection(collection_name=table_names[0], astra_db=conn)
-        self.cdc_collection = AstraDBCollection(collection_name=table_names[1], astra_db=conn)
+        # self.cdc_collection = AstraDBCollection(collection_name=table_names[1], astra_db=conn)
         self.component_collection = AstraDBCollection(collection_name=table_names[2], astra_db=conn)
         self.job_collection = AstraDBCollection(collection_name=table_names[3], astra_db=conn)
         self.parent_child_mappings = AstraDBCollection(collection_name=table_names[4], astra_db=conn)
@@ -103,7 +104,10 @@ class AstraMetaDataStore(MetaDataStore):
                 for document in response_generator:
                     if document['version'] not in distinct_values:
                         distinct_values.append(document['version'])
-                return sorted(distinct_values)[-1]
+                if distinct_values:  # Check if the list is not empty
+                    return sorted(distinct_values)[-1]
+                else:
+                    return None 
             else:
                 response_generator = self.component_collection.paginated_find(
                     filter={
@@ -116,7 +120,7 @@ class AstraMetaDataStore(MetaDataStore):
                             {
                                 'identifier': identifier,
                                 'type_id': type_id,
-                                'hidden': {'$exists': 0},
+                                'hidden': {'$exists': False},
                             },
                         ]
                     },
@@ -124,11 +128,15 @@ class AstraMetaDataStore(MetaDataStore):
                 for document in response_generator:
                     if document['version'] not in distinct_values:
                         distinct_values.append(document['version'])
-                return sorted(distinct_values)[-1]
+                if distinct_values:  # Check if the list is not empty
+                    return sorted(distinct_values)[-1]
+                else:
+                    return None 
         except IndexError:
             raise FileNotFoundError(f'Can\'t find {type_id}: {identifier} in metadata')
 
     def update_job(self, identifier: str, key: str, value: t.Any):
+        print("inside metadata.update_job")
         return self.job_collection.update_one(
             filter={'identifier': identifier}, update={'$set': {key: value}}
         ).get('status')
@@ -213,6 +221,7 @@ class AstraMetaDataStore(MetaDataStore):
             version: int,
             allow_hidden: bool = False,
     ) -> t.Dict[str, t.Any]:
+        print("inside child _get_component")
         if not allow_hidden:
             r = self.component_collection.find_one(
                 filter={
@@ -227,7 +236,7 @@ class AstraMetaDataStore(MetaDataStore):
                             'identifier': identifier,
                             'type_id': type_id,
                             'version': version,
-                            'hidden': {'$exists': 0},
+                            'hidden': {'$exists': False},
                         },
                     ]
                 }
