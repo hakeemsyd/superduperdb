@@ -136,7 +136,6 @@ class AstraMetaDataStore(MetaDataStore):
             raise FileNotFoundError(f'Can\'t find {type_id}: {identifier} in metadata')
 
     def update_job(self, identifier: str, key: str, value: t.Any):
-        print("inside metadata.update_job")
         return self.job_collection.update_one(
             filter={'identifier': identifier}, update={'$set': {key: value}}
         ).get('status')

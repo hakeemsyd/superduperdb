@@ -120,12 +120,11 @@ def _build_databackend_impl(uri, mapping, type: str = 'data_backend'):
         return mapping['mongodb'](conn, name)
     
     elif "astra.datastax.com" in uri:
-        token = 'AstraCS:ZJbqpAWaQnYiyymqNRzfibWp:5d4c777cad59d674759d3df6fe73435d3c47d975f4b83a324ed5a8b5c512bf9b'
-        # token = os.getenv('ASTRA_DB_TOKEN')
+        api_endpoint = '/'.join(uri.split('/')[:-2])
+        token= uri.split('/')[-1]
         if not token:
-            raise ValueError('ASTRA_DB_TOKEN not found in environment variables')
-        api_endpoint = '/'.join(uri.split('/')[:-1])
-        name = uri.split('/')[-1]
+            raise ValueError('ASTRA_DB_TOKEN not found in uri')
+        name = uri.split('/')[-2]
         conn = AstraDB(
             token=token,
             api_endpoint=api_endpoint,

@@ -388,14 +388,12 @@ class AstraQueryLinker(QueryLinker):
 
 @dc.dataclass(repr=False)
 class AstraInsert(Insert):
-    print("inside astra insert many")
     one: bool = False
 
     def execute(self, db):
         collection = db.databackend.get_table_or_collection(
             self.table_or_collection.identifier
         )
-        print("inside the astra insert")
         documents = [r.encode() for r in self.documents]
         response = collection.chunked_insert_many(documents=documents, chunk_size=20)
         inserted_ids = []
